@@ -25,6 +25,22 @@
     - [62082, 62101]
 数智渊阁（二楼 信息检索室）: *seat_f2s
 
+四楼: &seat_f4
+  title: 宋韵云图（四楼）
+  type: 自习室
+  room_id: 1558
+  ranges:
+    - [62565, 62896]
+宋韵云图（四楼）: *seat_f4
+
+六楼: &seat_f6
+  title: 杭韵数阁（六楼）
+  type: 自习室
+  room_id: 1559
+  ranges:
+    - [62897, 63116]
+杭韵数阁（六楼）: *seat_f6
+
 十二楼: &seat_f12
   title: 芯灵驿站（十二楼）
   type: 自习室
