@@ -10,6 +10,8 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from urllib.parse import urlsplit
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.wait import WebDriverWait
 import time
@@ -18,7 +20,7 @@ import time
 logging.basicConfig(
                     format='%(asctime)s,%(msecs)d %(name)s %(levelname)s %(message)s',
                     datefmt='%H:%M:%S',
-                    level=logging.DEBUG)
+                    level=logging.INFO)
 
 WEEKDAYS = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
 BOOK_DAYS_AHEAD = 2  # 预约后天
@@ -30,17 +32,17 @@ def target_weekday_name():
     return WEEKDAYS[(datetime.now().weekday() + BOOK_DAYS_AHEAD) % 7]
 
 
+def is_booking_enable(date_cfg):
+    if date_cfg['启用']:
+        return True
+    return False
+
+
 def expand_seat_cfg(cfg):
-    if not cfg:
-        return []
-    if cfg.get('ranges'):
-        ids = []
-        for pair in cfg['ranges']:
-            ids.extend(range(pair[0], pair[1] + 1))
-        return ids
-    if 'begin' in cfg and 'end' in cfg:
-        return list(range(cfg['begin'], cfg['end'] + 1))
-    return []
+    ids = []
+    for begin, end in cfg['ranges']:
+        ids.extend(range(begin, end + 1))
+    return ids
 
 
 def get_seats_with_config(user_config, date_config, seat_config):
@@ -48,24 +50,6 @@ def get_seats_with_config(user_config, date_config, seat_config):
     if seat_name == "自定义":
         return user_config['自定义']
     return expand_seat_cfg(seat_config[seat_name])
-
-
-def _json_has_booking(obj, depth=0):
-    if depth > 12 or obj is None:
-        return False
-    if isinstance(obj, dict):
-        for key in ("bookingId", "booking_id", "appointId", "appointment_id"):
-            val = obj.get(key)
-            if val not in (None, "", 0, "0"):
-                return True
-        ui = str(obj.get("ui_type") or "")
-        if "BookingItem" in ui or "MyBooking" in ui:
-            if obj.get("seatNum") or obj.get("roomName") or obj.get("id"):
-                return True
-        return any(_json_has_booking(v, depth + 1) for v in obj.values())
-    if isinstance(obj, list):
-        return any(_json_has_booking(v, depth + 1) for v in obj)
-    return False
 
 
 class SeatAutoBooker:
@@ -86,10 +70,9 @@ class SeatAutoBooker:
             print("没有Server酱的key,将不会推送消息")
 
         chrome_options = Options()
-        chrome_options.add_argument('--headless')
         chrome_options.add_argument('--no-sandbox')
         chrome_options.add_argument('--disable-dev-shm-usage')
-        # chromedriver 路径：环境变量 CHROMEDRIVER_PATH 可覆盖，其次探测常见安装位置，最后交给 PATH 解析
+        chrome_options.add_argument('--window-size=1920,1080')
         chromedriver_path = os.environ.get("CHROMEDRIVER_PATH", "")
         if not chromedriver_path:
             for candidate in ('/usr/local/bin/chromedriver', '/opt/homebrew/bin/chromedriver'):
@@ -153,30 +136,42 @@ class SeatAutoBooker:
             logging.info('开始登陆...')
 
             self.driver.get("https://hdu.huitu.zhishulib.com/")
-            logging.debug('打开网站.')
-            # 图书馆系统已接入学校统一身份认证平台(CAS)，页面会自动跳转到 sso.hdu.edu.cn
             self.wait.until(lambda d: "sso.hdu.edu.cn" in d.current_url)
-            logging.debug('已跳转至统一身份认证平台.')
 
-            self.wait.until(EC.presence_of_element_located((By.NAME, "username")))
-            logging.debug('找到用户名输入框.')
+            # 排除同名隐藏域
+            form_wait = WebDriverWait(self.driver, 30, 0.5)
+            user_el = form_wait.until(EC.element_to_be_clickable(
+                (By.CSS_SELECTOR, "input[name='username']:not([type='hidden'])")
+            ))
 
-            self.wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='password']")))
-            logging.debug('找到密码输入框.')
+            # 关掉公告弹窗
+            for close_button in self.driver.find_elements(
+                By.CSS_SELECTOR, "img.icon-close, .ant-modal-close"
+            ):
+                if close_button.is_displayed() and close_button.is_enabled():
+                    close_button.click()
+                    self.wait.until(EC.invisibility_of_element(close_button))
 
-            self.driver.find_element(By.NAME, 'username').clear()
-            self.driver.find_element(By.NAME, 'username').send_keys(self.un)  # 传送帐号
+            user_el.clear()
+            user_el.send_keys(self.un)
             logging.info('输入用户名')
 
-            self.driver.find_element(By.CSS_SELECTOR, "input[type='password']").clear()
-            self.driver.find_element(By.CSS_SELECTOR, "input[type='password']").send_keys(self.pd)  # 输入密码
+            pwd_el = form_wait.until(EC.visibility_of_element_located(
+                (By.CSS_SELECTOR, "input[type='password']")))
+            pwd_el.clear()
+            pwd_el.send_keys(self.pd)
             logging.info('输入密码')
-            logging.info('点击登录按钮')
-            # 按钮文字"登    录"中含多个空格且可能被遮挡，页面内直接触发点击事件最可靠
-            self.driver.execute_script("document.querySelector('button.login-button').click()")
 
-            # 等待CAS认证完成并跳回图书馆系统域名
-            WebDriverWait(self.driver, 30, 0.5).until(lambda d: "huitu.zhishulib.com" in d.current_url)
+            # 失焦后再点登录
+            pwd_el.send_keys(Keys.TAB)
+            form_wait.until(lambda d: "disabled" not in d.find_element(
+                By.CSS_SELECTOR, "button.login-button").get_attribute("class"))
+            self.driver.find_element(By.CSS_SELECTOR, "button.login-button").click()
+            logging.info('点击登录按钮')
+
+            # 等跳回图书馆域名
+            WebDriverWait(self.driver, 30, 0.5).until(
+                lambda d: urlsplit(d.current_url).hostname == "hdu.huitu.zhishulib.com")
             time.sleep(5)
             cookie_list = self.driver.get_cookies()
             self.cookie = ";".join([item["name"] + "=" + item["value"] + "" for item in cookie_list])
@@ -206,20 +201,6 @@ class SeatAutoBooker:
         print("获取用户数据成功")
         return 0
 
-    def has_existing_booking(self):
-        headers = self.cfg["headers"]
-        headers['Cookie'] = self.cookie
-        try:
-            resp = requests.get(
-                "https://hdu.huitu.zhishulib.com/Seat/Index/myBookingList?LAB_JSON=1",
-                headers=headers, timeout=20)
-            data = resp.json()
-        except Exception as e:
-            logging.exception(e)
-            print("查询已有预约失败，将尝试提交预约")
-            return False
-        return _json_has_booking(data)
-
     def wechatNotice(self, message, desp=None):
         logging.info('Sending WeChat notice')
 
@@ -248,6 +229,11 @@ if __name__ == "__main__":
     with open("config/seat_config.yml", 'r') as f_obj:
         seat_config = yaml.safe_load(f_obj)
 
+    if not is_booking_enable(user_config[target_weekday_name()]):
+        logging.info('预约未启用')
+        print("预约未启用")
+        exit(0)
+
     s = SeatAutoBooker(basic_config["SeatAutoBooker"])
     if not s.login() == 0:
         s.driver.quit()
@@ -257,12 +243,8 @@ if __name__ == "__main__":
         s.driver.quit()
         logging.info('Getting user info unsuccessful')
         exit(-1)
-    if s.has_existing_booking():
-        print("已有预约，结束")
-        s.driver.quit()
-        exit(0)
     result = s.book_favorite_seat(user_config=user_config, seat_config=seat_config)
-    code, message = result if result else (-1, "多次尝试均失败")
+    code, message = result if result else (-1, "预约失败")
     print("预约结果: {} {}".format(code, message))
     s.driver.quit()
     logging.info('End of the program')
